@@ -29,12 +29,12 @@ jobs:
       deployments: write
 
     env:
-      VERSION:         ${{ github.event.client_payload.version }}
-      IMAGE:           ${{ github.event.client_payload.image }}
-      RELEASE_TYPE:    ${{ github.event.client_payload.release_type }}
-      BRANCH:          ${{ github.event.client_payload.branch }}
-      APPROVED_BY:     ${{ github.event.client_payload.approved_by }}
-      ISSUE_NUMBER:    ${{ github.event.client_payload.issue_number }}
+      VERSION: ${{ github.event.client_payload.version }}
+      IMAGE: ${{ github.event.client_payload.image }}
+      RELEASE_TYPE: ${{ github.event.client_payload.release_type }}
+      BRANCH: ${{ github.event.client_payload.branch }}
+      APPROVED_BY: ${{ github.event.client_payload.approved_by }}
+      ISSUE_NUMBER: ${{ github.event.client_payload.issue_number }}
       REMAINING_CHAIN: ${{ github.event.client_payload.remaining_chain }}
 
     steps:
@@ -88,7 +88,7 @@ jobs:
       - name: Open next environment issue
         if: success() && env.REMAINING_CHAIN != ''
         env:
-          GH_TOKEN:       ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PRODUCTION_URL: ${{ secrets.PRODUCTION_URL }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -128,10 +128,10 @@ jobs:
       - name: Notify Slack — success
         if: success()
         env:
-          SLACK_WEBHOOK:  ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
           PRODUCTION_URL: ${{ secrets.PRODUCTION_URL }}
-          RUN_URL:        ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          RELEASE_URL:    ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ env.VERSION }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RELEASE_URL: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ env.VERSION }}
         run: |
           TYPE_EMOJI="🚀 Release"
           [[ "$RELEASE_TYPE" == "hotfix" ]] && TYPE_EMOJI="🚑 Hotfix"
