@@ -55,7 +55,7 @@ jobs:
 
     steps:
       - name: Checkout tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ inputs.tag }}
 
@@ -94,7 +94,7 @@ jobs:
 
     steps:
       - name: Checkout (for changelog)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ inputs.tag }}
           fetch-depth: 0
@@ -192,18 +192,31 @@ jobs:
           if echo "$NO_APPROVAL_ENVS" | grep -qw "$ENV"; then
             echo "🚀 Auto-deploying to ${ENV} (no approval required)"
 
+            jq -n \
+              --arg  event_type      "deploy-${ENV}" \
+              --arg  version         "${TAG}" \
+              --arg  image           "${IMAGE}" \
+              --arg  release_type    "${RELEASE_TYPE}" \
+              --arg  branch          "${BRANCH}" \
+              --arg  approved_by     "${ACTOR}" \
+              --argjson issue_number 0 \
+              --arg  remaining_chain "${REMAINING}" \
+              '{
+                event_type: $event_type,
+                client_payload: {
+                  version:         $version,
+                  image:           $image,
+                  release_type:    $release_type,
+                  branch:          $branch,
+                  approved_by:     $approved_by,
+                  issue_number:    $issue_number,
+                  remaining_chain: $remaining_chain
+                }
+              }' > /tmp/dispatch.json
+
             GH_TOKEN="$PAT_TOKEN" gh api "repos/${REPO}/dispatches" \
               --method POST \
-              --field event_type="deploy-${ENV}" \
-              --field client_payload="{
-                \"version\": \"${TAG}\",
-                \"image\": \"${IMAGE}\",
-                \"release_type\": \"${RELEASE_TYPE}\",
-                \"branch\": \"${BRANCH}\",
-                \"approved_by\": \"${ACTOR}\",
-                \"issue_number\": 0,
-                \"remaining_chain\": \"${REMAINING}\"
-              }"
+              --input /tmp/dispatch.json
 
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             echo "  🚀 Auto-dispatched: deploy-${ENV} → ${TAG}"

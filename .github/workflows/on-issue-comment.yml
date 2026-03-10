@@ -32,7 +32,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # ── STEP 1: Parse command from comment ──────────────────
       - name: Parse command
@@ -79,7 +79,7 @@ jobs:
         id: auth
         if: steps.parse.outputs.command != 'none'
         env:
-          ACTOR:       ${{ github.event.comment.user.login }}
+          ACTOR: ${{ github.event.comment.user.login }}
           ENVIRONMENT: ${{ steps.env.outputs.environment }}
         run: |
           if [[ ! -f ".github/approvers.yml" ]]; then
@@ -87,26 +87,32 @@ jobs:
             exit 1
           fi
 
-          AUTHORIZED=$(python3 - <<'PYEOF'
-import yaml, os, sys
+          ACTOR_LOWER=$(echo "$ACTOR" | tr '[:upper:]' '[:lower:]')
 
-environment = os.environ.get('ENVIRONMENT', '')
-actor       = os.environ.get('ACTOR', '')
+          # Extract approvers for the specific env, or fall back to 'default'.
+          # Reads lines under the matching key until the next top-level key or EOF.
+          get_approvers() {
+            local key="$1"
+            awk -v key="$key:" '
+              $0 ~ "^" key { found=1; next }
+              found && /^[^ ]/ { exit }
+              found && /^  - / { sub(/^  - /, ""); gsub(/[[:space:]]/, ""); print tolower($0) }
+            ' .github/approvers.yml
+          }
 
-with open('.github/approvers.yml', 'r') as f:
-    data = yaml.safe_load(f)
+          APPROVERS=$(get_approvers "$ENVIRONMENT")
 
-# Check env-specific list, fall back to 'default' if not defined
-approvers = data.get(environment) or data.get('default') or []
-approvers = [str(u).strip().lower() for u in approvers]
+          # Fall back to 'default' if the env block is empty
+          if [[ -z "$APPROVERS" ]]; then
+            APPROVERS=$(get_approvers "default")
+          fi
 
-if actor.lower() in approvers:
-    print('true')
-else:
-    print('false')
-    print(f"Not in list for '{environment}': {approvers}", file=sys.stderr)
-PYEOF
-          )
+          if echo "$APPROVERS" | grep -qx "$ACTOR_LOWER"; then
+            AUTHORIZED=true
+          else
+            AUTHORIZED=false
+            echo "Not in list for '${ENVIRONMENT}': $(echo "$APPROVERS" | tr '\n' ' ')" >&2
+          fi
 
           echo "authorized=$AUTHORIZED" >> $GITHUB_OUTPUT
 
@@ -120,10 +126,10 @@ PYEOF
       - name: Reject unauthorized
         if: steps.auth.outputs.authorized == 'false'
         env:
-          GH_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
-          ACTOR:        ${{ github.event.comment.user.login }}
-          ENVIRONMENT:  ${{ steps.env.outputs.environment }}
+          ACTOR: ${{ github.event.comment.user.login }}
+          ENVIRONMENT: ${{ steps.env.outputs.environment }}
         run: |
           gh issue comment "$ISSUE_NUMBER" --body \
             "❌ @${ACTOR} is not authorized to approve deployments to **${ENVIRONMENT^^}**.
@@ -166,16 +172,16 @@ PYEOF
           steps.auth.outputs.authorized == 'true' &&
           steps.parse.outputs.command == 'approve'
         env:
-          GH_TOKEN:     ${{ secrets.PAT_TOKEN }}
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
-          ACTOR:        ${{ github.event.comment.user.login }}
-          ENVIRONMENT:  ${{ steps.meta.outputs.environment }}
-          VERSION:      ${{ steps.meta.outputs.version }}
-          IMAGE:        ${{ steps.meta.outputs.image }}
+          ACTOR: ${{ github.event.comment.user.login }}
+          ENVIRONMENT: ${{ steps.meta.outputs.environment }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          IMAGE: ${{ steps.meta.outputs.image }}
           RELEASE_TYPE: ${{ steps.meta.outputs.release_type }}
-          BRANCH:       ${{ steps.meta.outputs.branch }}
-          REMAINING:    ${{ steps.meta.outputs.remaining }}
-          REPO:         ${{ github.repository }}
+          BRANCH: ${{ steps.meta.outputs.branch }}
+          REMAINING: ${{ steps.meta.outputs.remaining }}
+          REPO: ${{ github.repository }}
         run: |
           gh issue comment "$ISSUE_NUMBER" --body \
             "✅ **@${ACTOR}** approved deployment \`${VERSION}\` → **${ENVIRONMENT^^}**
@@ -185,18 +191,31 @@ PYEOF
           gh issue edit  "$ISSUE_NUMBER" --add-label "approved"
           gh issue close "$ISSUE_NUMBER" --reason completed
 
+          jq -n \
+            --arg  event_type      "deploy-${ENVIRONMENT}" \
+            --arg  version         "${VERSION}" \
+            --arg  image           "${IMAGE}" \
+            --arg  release_type    "${RELEASE_TYPE}" \
+            --arg  branch          "${BRANCH}" \
+            --arg  approved_by     "${ACTOR}" \
+            --argjson issue_number "${ISSUE_NUMBER}" \
+            --arg  remaining_chain "${REMAINING}" \
+            '{
+              event_type: $event_type,
+              client_payload: {
+                version:         $version,
+                image:           $image,
+                release_type:    $release_type,
+                branch:          $branch,
+                approved_by:     $approved_by,
+                issue_number:    $issue_number,
+                remaining_chain: $remaining_chain
+              }
+            }' > /tmp/dispatch.json
+
           gh api "repos/${REPO}/dispatches" \
             --method POST \
-            --field event_type="deploy-${ENVIRONMENT}" \
-            --field client_payload="{
-              \"version\": \"${VERSION}\",
-              \"image\": \"${IMAGE}\",
-              \"release_type\": \"${RELEASE_TYPE}\",
-              \"branch\": \"${BRANCH}\",
-              \"approved_by\": \"${ACTOR}\",
-              \"issue_number\": ${ISSUE_NUMBER},
-              \"remaining_chain\": \"${REMAINING}\"
-            }"
+            --input /tmp/dispatch.json
 
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "  ✅ Approved by @${ACTOR}"
@@ -209,12 +228,12 @@ PYEOF
           steps.auth.outputs.authorized == 'true' &&
           steps.parse.outputs.command == 'reject'
         env:
-          GH_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
-          ACTOR:        ${{ github.event.comment.user.login }}
-          ENVIRONMENT:  ${{ steps.meta.outputs.environment }}
-          VERSION:      ${{ steps.meta.outputs.version }}
-          REASON:       ${{ steps.parse.outputs.reason }}
+          ACTOR: ${{ github.event.comment.user.login }}
+          ENVIRONMENT: ${{ steps.meta.outputs.environment }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          REASON: ${{ steps.parse.outputs.reason }}
         run: |
           gh issue comment "$ISSUE_NUMBER" --body \
             "🚫 **@${ACTOR}** rejected deployment \`${VERSION}\` → **${ENVIRONMENT^^}**
