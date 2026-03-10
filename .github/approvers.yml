@@ -1,0 +1,50 @@
+# ============================================================
+# approvers.yml — Authorized approvers per environment
+#
+# Used by on-issue-comment.yml to validate /approve and /reject
+# commands on deployment issues.
+#
+# ── HOW IT WORKS ────────────────────────────────────────────
+# • When /approve or /reject is commented on a pending-<env>
+#   issue, the commenter's username is checked against this list.
+# • If no list is defined for the env, the 'default' list is
+#   used as fallback.
+# • Usernames are case-insensitive.
+#
+# ── DEVELOPMENT ─────────────────────────────────────────────
+# Development deploys automatically — this list is NOT used.
+# Approval for development is bypassed entirely in release.yml.
+#
+# ── ADDING A NEW ENVIRONMENT ────────────────────────────────
+# Add a new key matching the environment name. No workflow
+# changes needed.
+# ============================================================
+
+# Auto-deploy — approval bypassed, this list is not consulted.
+development: []
+
+# 1 approval required — any engineer can approve.
+staging:
+  - your-github-username
+  - another-engineer
+
+# 1 approval required — tech lead / CTO only.
+production:
+  - tech-lead-username
+
+# ── Optional environments ────────────────────────────────────
+# uat:
+#   - your-github-username
+#   - qa-lead
+#
+# beta:
+#   - your-github-username
+#
+# canary:
+#   - tech-lead-username
+
+# ── Optional: catch-all fallback ─────────────────────────────
+# Used for any env not listed above.
+#
+# default:
+#   - your-github-username

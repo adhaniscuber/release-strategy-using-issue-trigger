@@ -1,0 +1,182 @@
+# ============================================================
+# deploy-production.yml — Deploy to Production
+# Trigger : repository_dispatch → deploy-production
+# Input   : version, image, release_type, branch,
+#           approved_by, issue_number, remaining_chain
+#
+# ── CUSTOMISE THIS FILE ──────────────────────────────────────
+# Replace the "Deploy" step with your actual deploy commands.
+# Same patterns as deploy-staging.yml — just production target.
+#
+# ── NOTE ON remaining_chain ─────────────────────────────────
+# Production is usually the last env, so remaining_chain is
+# typically empty here. But the chain logic is still handled
+# in case you have post-production environments (e.g. canary).
+# ============================================================
+name: Deploy Production
+
+on:
+  repository_dispatch:
+    types: [deploy-production]
+
+jobs:
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      deployments: write
+
+    env:
+      VERSION:         ${{ github.event.client_payload.version }}
+      IMAGE:           ${{ github.event.client_payload.image }}
+      RELEASE_TYPE:    ${{ github.event.client_payload.release_type }}
+      BRANCH:          ${{ github.event.client_payload.branch }}
+      APPROVED_BY:     ${{ github.event.client_payload.approved_by }}
+      ISSUE_NUMBER:    ${{ github.event.client_payload.issue_number }}
+      REMAINING_CHAIN: ${{ github.event.client_payload.remaining_chain }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.VERSION }}
+
+      # ── DEPLOY ────────────────────────────────────────────
+      - name: Deploy to Production
+        env:
+          PRODUCTION_URL: ${{ secrets.PRODUCTION_URL }}
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  🚀 Deploying ${VERSION} to PRODUCTION"
+          echo "  📦 Image: ${IMAGE}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+          # ── Replace with your actual deploy commands ───────────
+          echo "✅ Deploy command executed"
+
+      # ── HEALTH CHECK ──────────────────────────────────────
+      - name: Health check
+        env:
+          PRODUCTION_URL: ${{ secrets.PRODUCTION_URL }}
+        run: |
+          echo "🔍 Health check: ${PRODUCTION_URL}/health"
+
+          MAX_RETRIES=8
+          RETRY_DELAY=15
+
+          for i in $(seq 1 $MAX_RETRIES); do
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+              --max-time 10 "${PRODUCTION_URL}/health" 2>/dev/null || echo "000")
+
+            if [[ "$HTTP_CODE" == "200" ]]; then
+              echo "✅ Health check passed (attempt ${i}) — HTTP ${HTTP_CODE}"
+              break
+            fi
+
+            if [[ $i -eq $MAX_RETRIES ]]; then
+              echo "❌ Production health check failed after ${MAX_RETRIES} attempts"
+              exit 1
+            fi
+
+            echo "⏳ Attempt ${i}/${MAX_RETRIES}: HTTP ${HTTP_CODE}, retrying in ${RETRY_DELAY}s..."
+            sleep "$RETRY_DELAY"
+          done
+
+      # ── OPEN NEXT ENV ISSUE (if chain continues) ──────────
+      - name: Open next environment issue
+        if: success() && env.REMAINING_CHAIN != ''
+        env:
+          GH_TOKEN:       ${{ secrets.GITHUB_TOKEN }}
+          PRODUCTION_URL: ${{ secrets.PRODUCTION_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          NEXT_ENV=$(echo "$REMAINING_CHAIN" | cut -d',' -f1)
+          NEXT_REMAINING=$(echo "$REMAINING_CHAIN" | cut -d',' -f2-)
+          [[ "$NEXT_ENV" == "$NEXT_REMAINING" ]] && NEXT_REMAINING=""
+
+          {
+            echo "## Deploy Request"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| **Version**                 | \`${VERSION}\` |"
+            echo "| **Target**                  | **${NEXT_ENV^^}** |"
+            echo "| **Type**                    | \`${RELEASE_TYPE}\` |"
+            echo "| **Image**                   | \`${IMAGE}\` |"
+            echo "| **Production approved by**  | @${APPROVED_BY} |"
+            echo "| **Production deployed**     | $(date -u '+%Y-%m-%d %H:%M UTC') |"
+            echo "| **Production logs**         | [View](${RUN_URL}) |"
+            echo ""
+            echo "<!-- deploy-meta"
+            echo "version: ${VERSION}"
+            echo "release_type: ${RELEASE_TYPE}"
+            echo "branch: ${BRANCH}"
+            echo "image: ${IMAGE}"
+            echo "environment: ${NEXT_ENV}"
+            echo "remaining_chain: ${NEXT_REMAINING}"
+            echo "-->"
+          } > /tmp/next-issue.md
+
+          gh issue create \
+            --title "🚀 Deploy ${VERSION} → ${NEXT_ENV^^}" \
+            --body-file /tmp/next-issue.md \
+            --label "pending-${NEXT_ENV}"
+
+      # ── NOTIFY SUCCESS ─────────────────────────────────────
+      - name: Notify Slack — success
+        if: success()
+        env:
+          SLACK_WEBHOOK:  ${{ secrets.SLACK_WEBHOOK_URL }}
+          PRODUCTION_URL: ${{ secrets.PRODUCTION_URL }}
+          RUN_URL:        ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RELEASE_URL:    ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ env.VERSION }}
+        run: |
+          TYPE_EMOJI="🚀 Release"
+          [[ "$RELEASE_TYPE" == "hotfix" ]] && TYPE_EMOJI="🚑 Hotfix"
+
+          curl -s -X POST "$SLACK_WEBHOOK" \
+            -H 'Content-Type: application/json' \
+            -d "{
+              \"text\": \"${TYPE_EMOJI} *${VERSION}* successfully deployed to *Production* ✅\",
+              \"attachments\": [{
+                \"color\": \"good\",
+                \"fields\": [
+                  {\"title\": \"Version\",     \"value\": \"<${RELEASE_URL}|\`${VERSION}\`>\", \"short\": true},
+                  {\"title\": \"Approved by\", \"value\": \"@${APPROVED_BY}\",                 \"short\": true},
+                  {\"title\": \"Production\",  \"value\": \"<${PRODUCTION_URL}|Open app>\",    \"short\": true},
+                  {\"title\": \"Logs\",        \"value\": \"<${RUN_URL}|View logs>\",          \"short\": true}
+                ],
+                \"footer\": \"Deployed via GitHub Actions\"
+              }]
+            }"
+
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  🎉 PRODUCTION DEPLOY COMPLETE"
+          echo "  Version    : ${VERSION}"
+          echo "  Approved by: @${APPROVED_BY}"
+          echo "  URL        : ${PRODUCTION_URL}"
+          echo "  Deployed at: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+      # ── NOTIFY FAILURE ─────────────────────────────────────
+      - name: Notify Slack — failure
+        if: failure()
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          curl -s -X POST "$SLACK_WEBHOOK" \
+            -H 'Content-Type: application/json' \
+            -d "{
+              \"text\": \"🔴 *Production deploy FAILED* — \`${VERSION}\`\",
+              \"attachments\": [{
+                \"color\": \"danger\",
+                \"fields\": [
+                  {\"title\": \"Version\",     \"value\": \"\`${VERSION}\`\",              \"short\": true},
+                  {\"title\": \"Approved by\", \"value\": \"@${APPROVED_BY}\",             \"short\": true},
+                  {\"title\": \"Logs\",        \"value\": \"<${RUN_URL}|View logs — URGENT>\"}
+                ]
+              }]
+            }"

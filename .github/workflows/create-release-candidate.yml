@@ -1,0 +1,110 @@
+# ============================================================
+# create-release-candidate.yml — Create Release Candidate Branch
+# Trigger : manual (workflow_dispatch)
+# Input   : base_branch + bump_type
+# Output  : branch release/vX.X.x baru dari base_branch
+# ============================================================
+name: Create Release Candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_branch:
+        description: "Base branch for release branch (leave empty for main)"
+        required: false
+        default: "main"
+        type: string
+      bump_type:
+        description: "Version bump - hanya berlaku jika latest tag adalah real (non-preview). Jika latest adalah preview, minor otomatis dari tag."
+        required: true
+        type: choice
+        default: minor
+        options:
+          - minor # fitur baru → release/v1.5.x ke release/v1.6.x
+          - major # breaking   → release/v1.x.x ke release/v2.0.x
+
+jobs:
+  create-release-candidate:
+    name: Create Release Candidate Branch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout base branch
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          ref: ${{ inputs.base_branch || 'main' }}
+          fetch-depth: 0
+
+      - name: Get latest tag
+        id: latest_tag
+        run: |
+          # Include preview tags — base branch name dari latest di main (termasuk preview)
+          LATEST=$(git tag --sort=-v:refname | grep '^v[0-9]' | head -1)
+          LATEST=${LATEST:-v0.0.0}
+          # Strip -preview untuk kalkulasi semver
+          BASE="${LATEST%-preview}"
+          echo "latest=${LATEST}" >> $GITHUB_OUTPUT
+          echo "base=${BASE}" >> $GITHUB_OUTPUT
+          echo "📌 Latest tag  : ${LATEST}"
+          echo "📐 Base semver : ${BASE}"
+
+      - name: Calculate release branch name
+        id: branch_version
+        env:
+          BASE: ${{ steps.latest_tag.outputs.base }}
+          LATEST: ${{ steps.latest_tag.outputs.latest }}
+          BUMP: ${{ inputs.bump_type }}
+        run: |
+          VERSION=${BASE#v}
+          MAJOR=$(echo $VERSION | cut -d. -f1)
+          MINOR=$(echo $VERSION | cut -d. -f2)
+
+          if [[ "$LATEST" == *"-preview" ]]; then
+            # Preview tag → minor sudah fix, tidak perlu bump
+            BRANCH_VERSION="v${MAJOR}.${MINOR}.x"
+            echo "🔢 ${LATEST} → release/${BRANCH_VERSION} (minor dari preview, bump_type diabaikan)"
+          else
+            # Real tag → apply bump_type
+            case "$BUMP" in
+              major) BRANCH_VERSION="v$((MAJOR+1)).0.x" ;;
+              minor) BRANCH_VERSION="v${MAJOR}.$((MINOR+1)).x" ;;
+            esac
+            echo "🔢 ${LATEST} → release/${BRANCH_VERSION} (${BUMP} bump)"
+          fi
+
+          BRANCH_NAME="release/${BRANCH_VERSION}"
+          echo "branch_name=${BRANCH_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Validate branch does not exist
+        env:
+          BRANCH_NAME: ${{ steps.branch_version.outputs.branch_name }}
+        run: |
+          if git branch -r | grep -q "origin/${BRANCH_NAME}$"; then
+            echo "❌ Branch ${BRANCH_NAME} sudah ada!"
+            exit 1
+          fi
+          echo "✅ Branch ${BRANCH_NAME} belum ada, aman dibuat."
+
+      - name: Create and push release branch
+        env:
+          BRANCH_NAME: ${{ steps.branch_version.outputs.branch_name }}
+          BASE_BRANCH: ${{ inputs.base_branch || 'main' }}
+          ACTOR: ${{ github.actor }}
+          ACTOR_ID: ${{ github.actor_id }}
+        run: |
+          git config user.name "$ACTOR"
+          git config user.email "${ACTOR_ID}+${ACTOR}@users.noreply.github.com"
+
+          git checkout -b "$BRANCH_NAME"
+          git push origin "$BRANCH_NAME"
+
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  ✅ Branch ${BRANCH_NAME} berhasil dibuat!"
+          echo "  📌 Base branch : ${BASE_BRANCH}"
+          echo "  🔜 Selanjutnya : QA di branch ini, lalu"
+          echo "     jalankan Create Release untuk deploy"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Release & Deploy Flow</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, 'Segoe UI', sans-serif;
+      background: #0d1117;
+      color: #e6edf3;
+      padding: 48px 20px 64px;
+    }
+
+    .page-title {
+      text-align: center;
+      font-size: 11px;
+      font-weight: 400;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      color: #6e7681;
+      margin-bottom: 4px;
+    }
+    .page-sub {
+      text-align: center;
+      font-size: 11px;
+      color: #30363d;
+      margin-bottom: 44px;
+      letter-spacing: 0.5px;
+    }
+
+    /* ─── CHART WRAPPER ─── */
+    .chart {
+      max-width: 560px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+    }
+
+    /* ─── NODE BOX ─── */
+    .node {
+      border-radius: 8px;
+      border: 1px solid #21262d;
+      background: #161b22;
+      padding: 11px 14px;
+    }
+    .node-eye {
+      font-size: 9.5px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 4px;
+    }
+    .node-title { font-size: 13px; font-weight: 600; color: #e6edf3; }
+    .node-sub   { font-size: 11px; color: #8b949e; margin-top: 3px; line-height: 1.5; }
+
+    /* node colour themes */
+    .n-manual   { border-color: #1f6feb55; background: #0c1827; }
+    .n-manual .node-eye { color: #58a6ff; }
+
+    .n-auto     { border-color: #2ea04355; background: #0a1810; }
+    .n-auto .node-eye   { color: #3fb950; }
+
+    .n-issue    { border-color: #bb800055; background: #191000; }
+    .n-issue .node-eye  { color: #e3b341; }
+
+    .n-gate     { border-color: #8957e555; background: #100c1c; }
+    .n-gate .node-eye   { color: #bc8cff; }
+
+    .n-stg      { border-color: #1f6feb; background: #0a1826; }
+    .n-stg .node-eye    { color: #79c0ff; }
+    .n-stg .node-title  { color: #79c0ff; }
+
+    .n-prod     { border-color: #8957e5; background: #0e0a1f; }
+    .n-prod .node-eye   { color: #d2a8ff; }
+    .n-prod .node-title { color: #d2a8ff; }
+
+    .n-done     { border-color: #2ea04355; background: #0a1810; }
+    .n-done .node-eye   { color: #3fb950; }
+
+    /* ─── CONNECTOR (straight arrow) ─── */
+    .arr {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .arr-line  { width: 1.5px; height: 22px; background: #30363d; }
+    .arr-head  { width: 0; height: 0;
+                 border-left: 5px solid transparent;
+                 border-right: 5px solid transparent;
+                 border-top: 6px solid #30363d; }
+    .arr-label { font-size: 10px; color: #484f58; margin: 2px 0; white-space: nowrap; }
+
+    /* ─── FORK (one-to-two split) ─── */
+    .fork-top  { width: 1.5px; height: 20px; background: #30363d; margin: 0 auto; }
+    .fork-bar  { height: 1.5px; background: #30363d; margin: 0 18%; }
+    .fork-legs { display: flex; justify-content: space-between; padding: 0 18%; }
+    .fork-leg  { width: 1.5px; height: 20px; background: #30363d; }
+    .fork-cols { display: flex; gap: 10px; width: 100%; }
+    .fork-col  { flex: 1; display: flex; flex-direction: column; align-items: center; }
+
+    /* ─── MERGE (two-to-one join) ─── */
+    .merge-legs  { display: flex; justify-content: space-between; padding: 0 18%; }
+    .merge-leg   { width: 1.5px; height: 20px; background: #30363d; }
+    .merge-bar   { height: 1.5px; background: #30363d; margin: 0 18%; }
+    .merge-bot   { width: 1.5px; height: 20px; background: #30363d; margin: 0 auto; }
+    .merge-arrow { display: flex; justify-content: center; }
+    .merge-head  { width: 0; height: 0;
+                   border-left: 5px solid transparent;
+                   border-right: 5px solid transparent;
+                   border-top: 6px solid #30363d; }
+
+    /* ─── INLINE TAGS ─── */
+    .tag {
+      display: inline-block;
+      font-size: 9px;
+      padding: 1px 7px;
+      border-radius: 20px;
+      font-weight: 600;
+      margin-top: 6px;
+      font-family: monospace;
+    }
+    .tag-y { background: #271c00; color: #e3b341; }
+    .tag-r { background: #270d0d; color: #f85149; }
+    .tag-g { background: #0a1c0d; color: #3fb950; }
+
+    /* ─── SECTION DIVIDER ─── */
+    .divider {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 4px 0;
+    }
+    .divider hr  { flex: 1; border: none; border-top: 1px solid #21262d; }
+    .divider span {
+      font-size: 9px;
+      color: #484f58;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    /* ─── FILE TABLE ─── */
+    .files {
+      max-width: 560px;
+      margin: 48px auto 0;
+      border: 1px solid #21262d;
+      border-radius: 8px;
+      overflow: hidden;
+      background: #161b22;
+    }
+    .files-head {
+      font-size: 9px;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      color: #484f58;
+      padding: 12px 16px 10px;
+      border-bottom: 1px solid #21262d;
+    }
+    .frow {
+      display: flex;
+      align-items: flex-start;
+      gap: 14px;
+      padding: 8px 16px;
+      border-bottom: 1px solid #0d1117;
+    }
+    .frow:last-child { border-bottom: none; }
+    .frow:hover { background: #1c2128; }
+    .fname {
+      font-family: monospace;
+      font-size: 10.5px;
+      color: #3fb950;
+      white-space: nowrap;
+      min-width: 215px;
+    }
+    .fname.warn    { color: #e3b341; }
+    .fdesc    { font-size: 10.5px; color: #8b949e; line-height: 1.5; }
+    .ftrigger { font-size: 10px; color: #484f58; margin-top: 1px; font-family: monospace; }
+  </style>
+</head>
+<body>
+
+<p class="page-title">Release &amp; Deploy Flow</p>
+<p class="page-sub">GitHub Actions · Issue-based Approval · ECS</p>
+
+<div class="chart">
+
+  <!-- ① TRIGGER -->
+  <div class="node n-manual">
+    <div class="node-eye">👤 Manual · workflow_dispatch</div>
+    <div class="node-title">Trigger Release</div>
+    <div class="node-sub">release_type: regular / hotfix &nbsp;·&nbsp; bump_type: patch / minor / major</div>
+  </div>
+
+  <div class="arr"><div class="arr-line"></div><div class="arr-head"></div></div>
+
+  <!-- ② CREATE RELEASE -->
+  <div class="node n-auto">
+    <div class="node-eye">🤖 create-release.yml</div>
+    <div class="node-title">Create Tag + GitHub Release</div>
+    <div class="node-sub">Kalkulasi versi → push tag → buat GitHub Release → trigger release.yml</div>
+  </div>
+
+  <div class="arr"><div class="arr-line"></div><div class="arr-head"></div></div>
+
+  <!-- ③ BUILD -->
+  <div class="node n-auto">
+    <div class="node-eye">🤖 release.yml</div>
+    <div class="node-title">Build Docker Image → Push ECR</div>
+    <div class="node-sub">Checkout tag → docker build → push → open GitHub Issue (regular: staging, hotfix: production)</div>
+  </div>
+
+  <!-- FORK: regular vs hotfix -->
+  <div class="fork-top"></div>
+  <div class="fork-bar"></div>
+  <div class="fork-legs"><div class="fork-leg"></div><div class="fork-leg"></div></div>
+
+  <div class="fork-cols">
+    <div class="fork-col">
+      <div class="node n-issue" style="width:100%">
+        <div class="node-eye">🟡 Regular flow</div>
+        <div class="node-title">Issue: Deploy → Staging</div>
+        <span class="tag tag-y">pending-staging</span>
+      </div>
+    </div>
+    <div class="fork-col">
+      <div class="node n-issue" style="width:100%">
+        <div class="node-eye">🚑 Hotfix flow</div>
+        <div class="node-title">Issue: Deploy → Production</div>
+        <span class="tag tag-r">pending-production</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Regular path continues; hotfix path merges later at Issue:Production -->
+  <!-- Show regular path going down (left half) -->
+  <div style="width:50%; align-self:flex-start;">
+    <div class="arr" style="margin-left:50%;">
+      <div class="arr-label">/approve</div>
+      <div class="arr-line"></div>
+      <div class="arr-head"></div>
+    </div>
+  </div>
+
+  <!-- ④ APPROVAL GATE (Staging) -->
+  <div class="node n-gate">
+    <div class="node-eye">🤖 on-issue-comment.yml · Approval Gate</div>
+    <div class="node-title">Validate Approver → Trigger Deploy</div>
+    <div class="node-sub">Cek <code style="background:#21262d;padding:1px 5px;border-radius:3px;font-size:10px;">.github/approvers.yml</code> &nbsp;·&nbsp; /approve → dispatch &nbsp;·&nbsp; /reject → close &amp; cancel</div>
+  </div>
+
+  <div class="arr"><div class="arr-line"></div><div class="arr-head"></div></div>
+
+  <!-- SECTION: STAGING -->
+  <div class="divider"><hr><span>Staging</span><hr></div>
+
+  <!-- ⑤ DEPLOY STAGING -->
+  <div class="node n-stg">
+    <div class="node-eye">🚀 deploy-staging.yml</div>
+    <div class="node-title">Deploy → ECS Staging</div>
+    <div class="node-sub">Update task definition → deploy → smoke test &amp; health check</div>
+  </div>
+
+  <!-- Staging and hotfix merge at Issue:Production -->
+  <div class="merge-legs"><div class="merge-leg"></div><div class="merge-leg"></div></div>
+  <div class="merge-bar"></div>
+  <div class="merge-bot"></div>
+  <div class="merge-arrow"><div class="merge-head"></div></div>
+
+  <!-- ⑥ ISSUE PRODUCTION (merged point) -->
+  <div class="node n-issue">
+    <div class="node-eye">🤖 Auto · Open GitHub Issue</div>
+    <div class="node-title">Issue: Deploy → Production</div>
+    <div class="node-sub">Staging sukses → open production approval issue &nbsp;·&nbsp; hotfix flow juga masuk di sini</div>
+    <span class="tag tag-y">pending-production</span>
+  </div>
+
+  <div class="arr">
+    <div class="arr-label">/approve</div>
+    <div class="arr-line"></div>
+    <div class="arr-head"></div>
+  </div>
+
+  <!-- ⑦ APPROVAL GATE (Production) -->
+  <div class="node n-gate">
+    <div class="node-eye">🤖 on-issue-comment.yml · Approval Gate</div>
+    <div class="node-title">Validate Approver → Trigger Deploy</div>
+    <div class="node-sub">Production approvers bisa dikonfigurasi lebih ketat dari staging</div>
+  </div>
+
+  <div class="arr"><div class="arr-line"></div><div class="arr-head"></div></div>
+
+  <!-- SECTION: PRODUCTION -->
+  <div class="divider"><hr><span>Production</span><hr></div>
+
+  <!-- ⑧ DEPLOY PRODUCTION -->
+  <div class="node n-prod">
+    <div class="node-eye">🚀 deploy-production.yml</div>
+    <div class="node-title">Deploy → ECS Production</div>
+    <div class="node-sub">Update task definition → deploy → health check → Slack notification</div>
+  </div>
+
+  <div class="arr"><div class="arr-line"></div><div class="arr-head"></div></div>
+
+  <!-- ⑨ DONE -->
+  <div class="node n-done">
+    <div class="node-eye">✅ Done</div>
+    <div class="node-title">Live di Production</div>
+    <div class="node-sub">Semua issue closed &nbsp;·&nbsp; audit trail tersimpan di GitHub Issues thread</div>
+  </div>
+
+</div><!-- /chart -->
+
+<!-- FILE TABLE -->
+<div class="files">
+  <div class="files-head">Workflow Files</div>
+
+  <div class="frow">
+    <div class="fname">create-release-candidate.yml</div>
+    <div>
+      <div class="fdesc">Buat release/vX.X.x branch dari main</div>
+      <div class="ftrigger">trigger: workflow_dispatch</div>
+    </div>
+  </div>
+
+  <div class="frow">
+    <div class="fname">create-release.yml</div>
+    <div>
+      <div class="fdesc">Kalkulasi versi, push tag, buat GitHub Release, trigger release.yml</div>
+      <div class="ftrigger">trigger: workflow_dispatch</div>
+    </div>
+  </div>
+
+  <div class="frow">
+    <div class="fname">release.yml</div>
+    <div>
+      <div class="fdesc">Build Docker image, push ke ECR, open approval issue</div>
+      <div class="ftrigger">trigger: workflow_dispatch ← dari create-release.yml</div>
+    </div>
+  </div>
+
+  <div class="frow">
+    <div class="fname">on-issue-comment.yml</div>
+    <div>
+      <div class="fdesc">Handle /approve &amp; /reject, validasi approvers.yml, dispatch deploy</div>
+      <div class="ftrigger">trigger: issue_comment → created</div>
+    </div>
+  </div>
+
+  <div class="frow">
+    <div class="fname">deploy-staging.yml</div>
+    <div>
+      <div class="fdesc">Deploy ECS staging, smoke test, health check, open production issue</div>
+      <div class="ftrigger">trigger: repository_dispatch → deploy-staging</div>
+    </div>
+  </div>
+
+  <div class="frow">
+    <div class="fname">deploy-production.yml</div>
+    <div>
+      <div class="fdesc">Deploy ECS production, health check, Slack notify</div>
+      <div class="ftrigger">trigger: repository_dispatch → deploy-production</div>
+    </div>
+  </div>
+
+  <div class="frow">
+    <div class="fname">cleanup.yml</div>
+    <div>
+      <div class="fdesc">Hapus release branch lama, simpan 2 terakhir</div>
+      <div class="ftrigger">trigger: push tag v*.*.*</div>
+    </div>
+  </div>
+
+  <div class="frow">
+    <div class="fname warn">deploy.yml</div>
+    <div>
+      <div class="fdesc" style="color:#e3b341;">⚠️ Tidak digunakan dalam issue-trigger flow. Workflow reusable generik (workflow_call) — kandidat untuk dihapus.</div>
+    </div>
+  </div>
+
+  <div class="frow">
+    <div class="fname">.github/approvers.yml</div>
+    <div>
+      <div class="fdesc">Daftar approver per environment</div>
+      <div class="ftrigger">staging: [...] · production: [...]</div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

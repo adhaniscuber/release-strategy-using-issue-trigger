@@ -1,0 +1,343 @@
+# ============================================================
+# create-release.yml — Create Release Tag
+# Trigger : manual (workflow_dispatch)
+# Input   : release_branch + bump_type + notes + release_type
+# Output  : tag baru yang validated + GitHub Release
+#           → eksplisit trigger release.yml dengan release_type
+# ============================================================
+name: Create Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: "Type: regular (dev→stg→prod) or hotfix (ONLY Production)"
+        required: false
+        default: "regular"
+        type: choice
+        options:
+          - regular
+          - hotfix
+      release_branch:
+        description: "Branch: main or release/vX.X.X). Leave empty to use main. Hotfix: leave empty to auto-detect latest release branch."
+        required: false
+        default: "main"
+        type: string
+      bump_type:
+        description: "Version bump - hanya berlaku untuk main. Release branch & hotfix otomatis dari branch name."
+        required: true
+        type: choice
+        options:
+          - patch # bug fix     → v1.5.2 ke v1.5.3
+          - minor # fitur baru  → v1.5.x ke v1.6.0
+          - major # breaking    → v1.x.x ke v2.0.0
+      notes:
+        description: "Notes (optional)"
+        required: false
+        default: ""
+        type: string
+
+jobs:
+  create-release:
+    name: Create Release Tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          ref: ${{ inputs.release_branch || 'main' }}
+          fetch-depth: 0
+
+      - name: Resolve branch
+        id: resolve_branch
+        env:
+          BRANCH: ${{ inputs.release_branch || 'main' }}
+          RELEASE_TYPE: ${{ inputs.release_type || 'regular' }}
+        run: |
+          BRANCH="${BRANCH:-main}"
+
+          if [[ "$RELEASE_TYPE" == "hotfix" ]]; then
+            if [[ "$BRANCH" == "main" ]]; then
+              # Auto-detect latest release branch
+              LATEST_RELEASE_BRANCH=$(git branch -r \
+                | grep 'origin/release/' \
+                | sed 's/.*origin\///' \
+                | sort -t'/' -k2 -V \
+                | tail -1)
+
+              if [[ -z "$LATEST_RELEASE_BRANCH" ]]; then
+                echo "❌ Tidak ada release branch ditemukan untuk hotfix"
+                exit 1
+              fi
+
+              echo "🔍 Auto-detected hotfix branch: ${LATEST_RELEASE_BRANCH}"
+              BRANCH="$LATEST_RELEASE_BRANCH"
+            elif [[ ! "$BRANCH" =~ ^release/v[0-9]+\.[0-9]+\.x$ ]]; then
+              echo "❌ Branch name tidak valid untuk hotfix: ${BRANCH}"
+              echo "   Format yang benar: release/v1.5.x atau kosongkan untuk auto-detect"
+              exit 1
+            fi
+          else
+            if [[ "$BRANCH" == "main" ]]; then
+              echo "✅ Using default branch: main"
+            elif [[ ! "$BRANCH" =~ ^release/v[0-9]+\.[0-9]+\.x$ ]]; then
+              echo "❌ Branch name tidak valid: ${BRANCH}"
+              echo "   Format yang benar: release/v1.5.x atau kosongkan untuk main"
+              exit 1
+            else
+              echo "✅ Branch name valid: ${BRANCH}"
+            fi
+          fi
+
+          # Flag apakah ini release branch (bukan main)
+          if [[ "$BRANCH" =~ ^release/v[0-9]+\.[0-9]+\.x$ ]]; then
+            echo "is_release_branch=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_release_branch=false" >> $GITHUB_OUTPUT
+          fi
+
+          echo "actual_branch=${BRANCH}" >> $GITHUB_OUTPUT
+          echo "✅ Branch resolved: ${BRANCH}"
+          git checkout "$BRANCH"
+
+      - name: Get latest tag
+        id: latest_tag
+        env:
+          RELEASE_TYPE: ${{ inputs.release_type || 'regular' }}
+          ACTUAL_BRANCH: ${{ steps.resolve_branch.outputs.actual_branch }}
+          IS_RELEASE_BRANCH: ${{ steps.resolve_branch.outputs.is_release_branch }}
+        run: |
+          if [[ "$RELEASE_TYPE" == "hotfix" || "$IS_RELEASE_BRANCH" == "true" ]]; then
+            # Scope ke minor version dari branch name (release/v1.7.x → v1.7)
+            MINOR_PREFIX=$(echo "$ACTUAL_BRANCH" | grep -oE 'v[0-9]+\.[0-9]+')
+            PREV=$(git tag --sort=-v:refname | grep "^${MINOR_PREFIX}\." | grep -v '\-preview' | head -1)
+            BASE="$PREV"
+            echo "🔍 Latest for ${MINOR_PREFIX}.x: ${PREV:-none}"
+          else
+            # Main: include preview tags agar bisa increment dari preview sebelumnya
+            PREV=$(git tag --sort=-v:refname | grep '^v[0-9]' | head -1)
+            PREV=${PREV:-v0.0.0}
+            # Strip -preview untuk kalkulasi semver
+            BASE="${PREV%-preview}"
+            echo "📌 Latest (incl. preview): ${PREV} → base: ${BASE}"
+          fi
+
+          echo "prev=${PREV:-v0.0.0}" >> $GITHUB_OUTPUT
+          echo "base=${BASE:-v0.0.0}" >> $GITHUB_OUTPUT
+
+      - name: Calculate next version
+        id: next_version
+        env:
+          BASE: ${{ steps.latest_tag.outputs.base }}
+          PREV: ${{ steps.latest_tag.outputs.prev }}
+          BUMP: ${{ inputs.bump_type }}
+          RELEASE_TYPE: ${{ inputs.release_type || 'regular' }}
+          IS_RELEASE_BRANCH: ${{ steps.resolve_branch.outputs.is_release_branch }}
+          ACTUAL_BRANCH: ${{ steps.resolve_branch.outputs.actual_branch }}
+        run: |
+          if [[ "$IS_RELEASE_BRANCH" == "true" || "$RELEASE_TYPE" == "hotfix" ]]; then
+            # Versi dari branch name → selalu patch (bump_type diabaikan)
+            MINOR_PREFIX=$(echo "$ACTUAL_BRANCH" | grep -oE 'v[0-9]+\.[0-9]+')
+            if [[ -z "$BASE" || "$BASE" == "v0.0.0" ]]; then
+              # Belum ada tag untuk minor ini → pertama kali
+              NEXT="${MINOR_PREFIX}.0"
+            else
+              PATCH=$(echo ${BASE#v} | cut -d. -f3)
+              NEXT="${MINOR_PREFIX}.$((PATCH+1))"
+            fi
+            echo "🔢 ${PREV:-none} → ${NEXT} (auto patch from branch)"
+          else
+            # Main: bump sesuai pilihan, append -preview
+            VERSION=${BASE#v}
+            MAJOR=$(echo $VERSION | cut -d. -f1)
+            MINOR=$(echo $VERSION | cut -d. -f2)
+            PATCH=$(echo $VERSION | cut -d. -f3)
+
+            case "$BUMP" in
+              major) NEXT="v$((MAJOR+1)).0.0" ;;
+              minor) NEXT="v${MAJOR}.$((MINOR+1)).0" ;;
+              patch) NEXT="v${MAJOR}.${MINOR}.$((PATCH+1))" ;;
+            esac
+
+            NEXT="${NEXT}-preview"
+            echo "🔢 ${PREV} → ${NEXT} (${BUMP} bump)"
+          fi
+
+          echo "next=${NEXT}" >> $GITHUB_OUTPUT
+          echo "prev=${PREV:-v0.0.0}" >> $GITHUB_OUTPUT
+
+      - name: Validate tag does not exist
+        env:
+          NEXT: ${{ steps.next_version.outputs.next }}
+        run: |
+          if git tag | grep -q "^${NEXT}$"; then
+            echo "❌ Tag ${NEXT} sudah ada! Tidak bisa lanjut."
+            echo "   Gunakan bump type yang lain atau cek release branch."
+            exit 1
+          fi
+          echo "✅ Tag ${NEXT} belum ada, aman dibuat."
+
+      - name: Generate changelog
+        id: changelog
+        env:
+          PREV: ${{ steps.next_version.outputs.prev }}
+          NEXT: ${{ steps.next_version.outputs.next }}
+          REPO: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          FORMAT="- [\`%h\`](${SERVER_URL}/${REPO}/commit/%H) %s"
+
+          # Ambil commit messages sejak tag terakhir
+          if git tag | grep -q "^${PREV}$"; then
+            git log "${PREV}..HEAD" --no-merges --format="${FORMAT}" > /tmp/changelog.txt
+          else
+            git log --no-merges -20 --format="${FORMAT}" > /tmp/changelog.txt
+          fi
+
+          echo "✅ Changelog generated"
+
+      - name: Detect related tags
+        id: related_tags
+        env:
+          PREV: ${{ steps.next_version.outputs.prev }}
+        run: |
+          # Auto-detect: cari pola "(cherry picked from commit <sha>)" di commit messages
+          if git tag | grep -q "^${PREV}$"; then
+            RANGE="${PREV}..HEAD"
+          else
+            RANGE="HEAD~20"
+          fi
+
+          DETECTED=""
+          while IFS= read -r SHA; do
+            [[ -z "$SHA" ]] && continue
+            TAG=$(git tag --contains "$SHA" 2>/dev/null \
+              | grep '^v[0-9]' \
+              | grep -v '\-preview' \
+              | sort -V \
+              | head -1)
+            if [[ -n "$TAG" && ! "$DETECTED" =~ (^|, )"$TAG"(,|$) ]]; then
+              DETECTED="${DETECTED:+$DETECTED, }${TAG}"
+            fi
+          done < <(git log "$RANGE" --no-merges --format="%B" \
+            | grep -oE 'cherry picked from commit [a-f0-9]+' \
+            | awk '{print $NF}')
+
+          if [[ -n "$DETECTED" ]]; then
+            echo "🍒 Auto-detected related tags: ${DETECTED}"
+          else
+            echo "ℹ️  Tidak ada cherry-pick reference ditemukan"
+          fi
+
+          echo "related_tags=${DETECTED}" >> $GITHUB_OUTPUT
+
+      - name: Create and push tag
+        env:
+          NEXT: ${{ steps.next_version.outputs.next }}
+          BRANCH: ${{ steps.resolve_branch.outputs.actual_branch }}
+        run: |
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
+
+          git tag "$NEXT"
+          git push origin "$NEXT"
+
+          echo "🏷️  Tag ${NEXT} berhasil dibuat dari branch ${BRANCH}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEXT: ${{ steps.next_version.outputs.next }}
+          PREV: ${{ steps.next_version.outputs.prev }}
+          BRANCH: ${{ steps.resolve_branch.outputs.actual_branch }}
+          BUMP: ${{ inputs.bump_type }}
+          NOTES: ${{ inputs.notes }}
+          RELEASE_TYPE: ${{ inputs.release_type || 'regular' }}
+          RELATED_TAG: ${{ steps.related_tags.outputs.related_tags }}
+          IS_RELEASE_BRANCH: ${{ steps.resolve_branch.outputs.is_release_branch }}
+          ACTOR: ${{ github.actor }}
+
+        run: |
+          BUMP_EMOJI=""
+          case "$BUMP" in
+            major) BUMP_EMOJI="🔴 MAJOR" ;;
+            minor) BUMP_EMOJI="🔵 MINOR" ;;
+            patch) BUMP_EMOJI="🟢 PATCH" ;;
+          esac
+
+          # Override emoji
+          if [[ "$RELEASE_TYPE" == "hotfix" ]]; then
+            BUMP_EMOJI="🚑 HOTFIX"
+          elif [[ "$IS_RELEASE_BRANCH" == "false" ]]; then
+            BUMP_EMOJI="🔍 PREVIEW"
+          fi
+
+          # Tulis release notes ke file untuk menghindari masalah quoting
+          {
+            echo "## ${BUMP_EMOJI} Release ${NEXT}"
+            echo ""
+            echo "**Branch:** \`${BRANCH}\`"
+            echo "**Previous:** \`${PREV}\` → **Current:** \`${NEXT}\`"
+            echo "**Triggered by:** @${ACTOR}"
+            if [[ -n "${RELATED_TAG}" ]]; then
+              echo "**Cherry-picked from:** \`${RELATED_TAG}\`"
+            fi
+            echo ""
+            echo "---"
+            if [[ -n "${NOTES}" ]]; then
+              echo ""
+              echo "### Notes"
+              echo ""
+              echo "${NOTES}"
+              echo ""
+              echo "---"
+            fi
+            echo ""
+            echo "### Changes since ${PREV}"
+            echo ""
+            cat /tmp/changelog.txt
+            echo ""
+            echo "---"
+            echo "> 🤖 Release dibuat otomatis via GitHub Actions"
+          } > /tmp/release-notes.md
+
+          # Preview release ditandai sebagai pre-release di GitHub
+          if [[ "$IS_RELEASE_BRANCH" == "false" && "$RELEASE_TYPE" != "hotfix" ]]; then
+            gh release create "$NEXT" \
+              --title "${NEXT}" \
+              --target "$BRANCH" \
+              --prerelease \
+              --notes-file /tmp/release-notes.md
+          else
+            gh release create "$NEXT" \
+              --title "${NEXT}" \
+              --target "$BRANCH" \
+              --notes-file /tmp/release-notes.md
+          fi
+
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  ✅ Release ${NEXT} berhasil dibuat!"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+      - name: Trigger deployment
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          NEXT: ${{ steps.next_version.outputs.next }}
+          RELEASE_TYPE: ${{ inputs.release_type || 'regular' }}
+          BRANCH: ${{ steps.resolve_branch.outputs.actual_branch }}
+        run: |
+          gh workflow run release.yml \
+            --ref main \
+            --field tag="$NEXT" \
+            --field branch="$BRANCH" \
+            --field release_type="$RELEASE_TYPE"
+
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  🚀 Triggered release.yml → ${NEXT} (${RELEASE_TYPE}) from ${BRANCH}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

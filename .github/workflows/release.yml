@@ -1,0 +1,267 @@
+# ============================================================
+# release.yml — Build image + orchestrate deployment chain
+# Trigger : workflow_dispatch (called by create-release.yml)
+# Input   : tag + branch + release_type
+# Output  : image pushed to registry + GitHub Issue for first env
+#
+# ── HOW THE CHAIN WORKS ──────────────────────────────────────
+# 1. This workflow builds the Docker image once.
+# 2. Opens an approval issue for the FIRST env in the chain.
+# 3. on-issue-comment.yml handles /approve → dispatches to
+#    deploy-<env>.yml, which deploys then opens the next issue.
+#    Repeat until the chain is complete.
+#
+# ── CONFIGURING CHAINS ──────────────────────────────────────
+# Edit the "Determine deployment chain" step below.
+# Format: comma-separated env names in order.
+#
+#   regular (main)           → development,staging           (preview, skip production)
+#   regular (release branch) → development,staging,production (official release)
+#   hotfix                   → staging,production             (skip dev, fix sudah di main)
+# ============================================================
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version tag (e.g. v1.2.3)"
+        required: true
+        type: string
+      branch:
+        description: "Source branch"
+        required: true
+        type: string
+      release_type:
+        description: "Release type"
+        required: true
+        default: "regular"
+        type: choice
+        options:
+          - regular
+          - hotfix
+
+jobs:
+  # ─────────────────────────────────────────────────────────
+  # JOB 1 – Build & push Docker image (runs once for all envs)
+  # ─────────────────────────────────────────────────────────
+  build:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Build & push image
+        id: build
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          IMAGE="your-registry/your-app:${TAG}"
+
+          # ── Replace with your registry/build setup ─────────────
+          # Docker Hub:
+          #   docker build -t "$IMAGE" . && docker push "$IMAGE"
+          #
+          # AWS ECR:
+          #   aws ecr get-login-password | docker login --username AWS ...
+          #   docker build -t "$IMAGE" . && docker push "$IMAGE"
+          #
+          # GCP Artifact Registry / ghcr.io / etc — same pattern
+          # ──────────────────────────────────────────────────────
+          echo "🔨 Building: $IMAGE"
+          echo "✅ Image pushed: $IMAGE"
+
+          echo "image=$IMAGE" >> $GITHUB_OUTPUT
+
+  # ─────────────────────────────────────────────────────────
+  # JOB 2 – Start deployment chain (auto-deploy or open approval issue)
+  # ─────────────────────────────────────────────────────────
+  open-approval-issue:
+    name: Open Approval Issue
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - name: Checkout (for changelog)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+
+      - name: Get previous tag
+        id: prev_tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          PREV=$(git tag --sort=-v:refname \
+            | grep '^v[0-9]' \
+            | grep -v "^${TAG}$" \
+            | grep -v '\-preview' \
+            | head -1)
+          echo "prev=${PREV:-v0.0.0}" >> $GITHUB_OUTPUT
+
+      - name: Generate changelog
+        env:
+          PREV: ${{ steps.prev_tag.outputs.prev }}
+          TAG:  ${{ inputs.tag }}
+          REPO: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          FORMAT="- [\`%h\`](${SERVER_URL}/${REPO}/commit/%H) %s"
+          if git tag | grep -q "^${PREV}$"; then
+            git log "${PREV}..${TAG}" --no-merges --format="${FORMAT}" | head -30 > /tmp/changelog.txt
+          else
+            git log "${TAG}" --no-merges -20 --format="${FORMAT}" > /tmp/changelog.txt
+          fi
+          echo "✅ Changelog: $(wc -l < /tmp/changelog.txt) commits"
+
+      - name: Ensure labels exist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Add any new environment names here
+          for ENV in development staging uat beta production; do
+            gh label create "pending-${ENV}" --force \
+              --color "e3b341" \
+              --description "Deployment: pending ${ENV}" 2>/dev/null || true
+          done
+          gh label create "approved" --force --color "3fb950" --description "Deployment: approved" 2>/dev/null || true
+          gh label create "rejected" --force --color "f85149" --description "Deployment: rejected" 2>/dev/null || true
+
+      - name: Determine deployment chain
+        id: chain
+        env:
+          RELEASE_TYPE: ${{ inputs.release_type }}
+          BRANCH:       ${{ inputs.branch }}
+        run: |
+          # ── Configure chains per release_type ─────────────────
+          # Format: comma-separated env names, in deployment order.
+          # Envs that skip approval gate: see "Open approval issue" step.
+          # ──────────────────────────────────────────────────────
+          case "$RELEASE_TYPE" in
+            regular)
+              if [[ "$BRANCH" == "main" ]]; then
+                CHAIN="development,staging"           # preview — skip production
+              else
+                CHAIN="development,staging,production"  # official release
+              fi
+              ;;
+            hotfix) CHAIN="staging,production" ;;    # fix sudah di main, skip dev
+            *)      CHAIN="development,staging,production" ;;
+          esac
+
+          FIRST_ENV=$(echo "$CHAIN" | cut -d',' -f1)
+          REMAINING=$(echo "$CHAIN" | cut -d',' -f2-)
+          [[ "$FIRST_ENV" == "$REMAINING" ]] && REMAINING=""
+
+          echo "first_env=${FIRST_ENV}" >> $GITHUB_OUTPUT
+          echo "remaining=${REMAINING}" >> $GITHUB_OUTPUT
+          echo "✅ Chain: ${CHAIN} | first: ${FIRST_ENV} | remaining: [${REMAINING}]"
+
+      - name: Open approval issue
+        env:
+          GH_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
+          PAT_TOKEN:    ${{ secrets.PAT_TOKEN }}
+          TAG:          ${{ inputs.tag }}
+          BRANCH:       ${{ inputs.branch }}
+          RELEASE_TYPE: ${{ inputs.release_type }}
+          IMAGE:        ${{ needs.build.outputs.image }}
+          PREV:         ${{ steps.prev_tag.outputs.prev }}
+          ACTOR:        ${{ github.actor }}
+          ENV:          ${{ steps.chain.outputs.first_env }}
+          REMAINING:    ${{ steps.chain.outputs.remaining }}
+          REPO:         ${{ github.repository }}
+          RUN_URL:      ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # ── Auto-deploy envs (no approval needed) ─────────────
+          # Add env names (space-separated) to bypass the issue gate.
+          # ──────────────────────────────────────────────────────
+          NO_APPROVAL_ENVS="development"
+
+          if echo "$NO_APPROVAL_ENVS" | grep -qw "$ENV"; then
+            echo "🚀 Auto-deploying to ${ENV} (no approval required)"
+
+            GH_TOKEN="$PAT_TOKEN" gh api "repos/${REPO}/dispatches" \
+              --method POST \
+              --field event_type="deploy-${ENV}" \
+              --field client_payload="{
+                \"version\": \"${TAG}\",
+                \"image\": \"${IMAGE}\",
+                \"release_type\": \"${RELEASE_TYPE}\",
+                \"branch\": \"${BRANCH}\",
+                \"approved_by\": \"${ACTOR}\",
+                \"issue_number\": 0,
+                \"remaining_chain\": \"${REMAINING}\"
+              }"
+
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "  🚀 Auto-dispatched: deploy-${ENV} → ${TAG}"
+            echo "  ⏩ Next in chain  : [${REMAINING}]"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            exit 0
+          fi
+
+          # ── Approval-gated envs — create GitHub Issue ─────────
+          TITLE="🚀 Deploy ${TAG} → ${ENV^^}"
+          [[ "$RELEASE_TYPE" == "hotfix" ]] && TITLE="🚑 Hotfix ${TAG} → ${ENV^^}"
+
+          {
+            echo "## Deploy Request"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| **Version**      | \`${TAG}\` |"
+            echo "| **Target**       | **${ENV^^}** |"
+            echo "| **Type**         | \`${RELEASE_TYPE}\` |"
+            echo "| **Branch**       | \`${BRANCH}\` |"
+            echo "| **Image**        | \`${IMAGE}\` |"
+            echo "| **Requested by** | @${ACTOR} |"
+            echo "| **Build**        | [View logs](${RUN_URL}) |"
+            echo ""
+            echo "---"
+            echo ""
+            echo "### Changes since \`${PREV}\`"
+            echo ""
+            cat /tmp/changelog.txt
+            echo ""
+            echo "---"
+            echo ""
+            echo "### How to Approve"
+            echo ""
+            echo "| Command | Action |"
+            echo "|---|---|"
+            echo "| \`/approve\` | ✅ Deploy to **${ENV^^}** |"
+            echo "| \`/reject [reason]\` | 🚫 Cancel deployment |"
+            echo ""
+            echo "> ⚠️ Only authorized approvers in \`.github/approvers.yml\` can use these commands."
+            echo ""
+            echo "<!-- deploy-meta"
+            echo "version: ${TAG}"
+            echo "release_type: ${RELEASE_TYPE}"
+            echo "branch: ${BRANCH}"
+            echo "image: ${IMAGE}"
+            echo "environment: ${ENV}"
+            echo "remaining_chain: ${REMAINING}"
+            echo "-->"
+          } > /tmp/issue-body.md
+
+          ISSUE_URL=$(gh issue create \
+            --title  "$TITLE" \
+            --body-file /tmp/issue-body.md \
+            --label "pending-${ENV}")
+
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  📋 Issue: ${ISSUE_URL}"
+          echo "  ⏳ Waiting for /approve..."
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

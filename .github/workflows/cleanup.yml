@@ -1,0 +1,60 @@
+# ============================================================
+# cleanup.yml — Cleanup Old Release Branches
+# Trigger : setiap push tag (setelah release baru)
+# Tujuan  : hapus release branch lama, simpan 2 terakhir
+# ============================================================
+name: Cleanup Old Release Branches
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+jobs:
+  cleanup:
+    name: Cleanup Old Release Branches
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Delete old release branches (keep last 2)
+        run: |
+          echo "🔍 Mencari release branches..."
+
+          # Ambil semua release branch, urutkan semver
+          BRANCHES=$(git branch -r \
+            | grep 'origin/release/' \
+            | sed 's/.*origin\///' \
+            | sort -t'/' -k2 -V)
+
+          echo "Release branches yang ada:"
+          echo "$BRANCHES"
+          echo ""
+
+          TOTAL=$(echo "$BRANCHES" | grep -c . || true)
+
+          if [ "$TOTAL" -le 2 ]; then
+            echo "✅ Hanya ada ${TOTAL} release branch, tidak ada yang dihapus."
+            exit 0
+          fi
+
+          # Ambil semua kecuali 2 terakhir
+          TO_DELETE=$(echo "$BRANCHES" | head -n -2)
+
+          echo "🗑️  Branch yang akan dihapus:"
+          echo "$TO_DELETE"
+          echo ""
+
+          for BRANCH in $TO_DELETE; do
+            git push origin --delete "$BRANCH"
+            echo "✅ Deleted: ${BRANCH}"
+          done
+
+          echo ""
+          echo "✅ Cleanup selesai. Sisa 2 release branch terbaru."

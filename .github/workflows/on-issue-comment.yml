@@ -1,0 +1,232 @@
+# ============================================================
+# on-issue-comment.yml — Approval gate via issue comment
+# Trigger : issue_comment → created
+# Handles : /approve and /reject on ANY pending-<env> issue
+# Auth    : validates against .github/approvers.yml
+#           (per-env config, with optional 'default' fallback)
+# Output  : triggers deploy-<env> via repository_dispatch
+#
+# ── ADDING A NEW ENVIRONMENT ────────────────────────────────
+# No changes needed here. Just:
+#   1. Add the env to release.yml deployment chain
+#   2. Create deploy-<env>.yml
+#   3. Add approvers in .github/approvers.yml
+# ============================================================
+name: On Issue Comment
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  handle-command:
+    name: Handle Approval Command
+    runs-on: ubuntu-latest
+
+    # Run for any issue that has a pending-* label
+    if: contains(toJson(github.event.issue.labels.*.name), '"pending-')
+
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── STEP 1: Parse command from comment ──────────────────
+      - name: Parse command
+        id: parse
+        env:
+          COMMENT: ${{ github.event.comment.body }}
+        run: |
+          COMMENT_CLEAN=$(echo "$COMMENT" | sed 's/^[[:space:]]*//' | head -1)
+
+          if echo "$COMMENT_CLEAN" | grep -qiE '^/approve[[:space:]]*$'; then
+            echo "command=approve" >> $GITHUB_OUTPUT
+            echo "reason="         >> $GITHUB_OUTPUT
+            echo "✅ Command: approve"
+
+          elif echo "$COMMENT_CLEAN" | grep -qiE '^/reject'; then
+            REASON=$(echo "$COMMENT_CLEAN" | sed 's|^/reject[[:space:]]*||i' | xargs)
+            echo "command=reject"                        >> $GITHUB_OUTPUT
+            echo "reason=${REASON:-No reason provided}" >> $GITHUB_OUTPUT
+            echo "🚫 Command: reject (reason: ${REASON:-none})"
+
+          else
+            echo "command=none" >> $GITHUB_OUTPUT
+            echo "ℹ️  Not a command, skipping."
+          fi
+
+      # ── STEP 2: Extract target environment from label ────────
+      - name: Determine environment
+        id: env
+        if: steps.parse.outputs.command != 'none'
+        run: |
+          LABELS="${{ join(github.event.issue.labels.*.name, ',') }}"
+          ENV=$(echo "$LABELS" | tr ',' '\n' | grep '^pending-' | head -1 | sed 's/^pending-//')
+
+          if [[ -z "$ENV" ]]; then
+            echo "❌ Could not determine environment from labels: ${LABELS}"
+            exit 1
+          fi
+
+          echo "environment=${ENV}" >> $GITHUB_OUTPUT
+          echo "✅ Environment: ${ENV}"
+
+      # ── STEP 3: Check authorization ─────────────────────────
+      - name: Check authorization
+        id: auth
+        if: steps.parse.outputs.command != 'none'
+        env:
+          ACTOR:       ${{ github.event.comment.user.login }}
+          ENVIRONMENT: ${{ steps.env.outputs.environment }}
+        run: |
+          if [[ ! -f ".github/approvers.yml" ]]; then
+            echo "❌ .github/approvers.yml not found!"
+            exit 1
+          fi
+
+          AUTHORIZED=$(python3 - <<'PYEOF'
+import yaml, os, sys
+
+environment = os.environ.get('ENVIRONMENT', '')
+actor       = os.environ.get('ACTOR', '')
+
+with open('.github/approvers.yml', 'r') as f:
+    data = yaml.safe_load(f)
+
+# Check env-specific list, fall back to 'default' if not defined
+approvers = data.get(environment) or data.get('default') or []
+approvers = [str(u).strip().lower() for u in approvers]
+
+if actor.lower() in approvers:
+    print('true')
+else:
+    print('false')
+    print(f"Not in list for '{environment}': {approvers}", file=sys.stderr)
+PYEOF
+          )
+
+          echo "authorized=$AUTHORIZED" >> $GITHUB_OUTPUT
+
+          if [[ "$AUTHORIZED" == "true" ]]; then
+            echo "✅ @${ACTOR} authorized for ${ENVIRONMENT}"
+          else
+            echo "❌ @${ACTOR} NOT authorized for ${ENVIRONMENT}"
+          fi
+
+      # ── STEP 4: Reject unauthorized attempt ─────────────────
+      - name: Reject unauthorized
+        if: steps.auth.outputs.authorized == 'false'
+        env:
+          GH_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ACTOR:        ${{ github.event.comment.user.login }}
+          ENVIRONMENT:  ${{ steps.env.outputs.environment }}
+        run: |
+          gh issue comment "$ISSUE_NUMBER" --body \
+            "❌ @${ACTOR} is not authorized to approve deployments to **${ENVIRONMENT^^}**.
+
+          See \`.github/approvers.yml\` for the list of valid approvers."
+
+      # ── STEP 5: Extract deploy metadata from issue body ─────
+      - name: Extract deploy metadata
+        id: meta
+        if: steps.auth.outputs.authorized == 'true'
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          META=$(echo "$ISSUE_BODY" | awk '/<!-- deploy-meta/,/-->/' | grep -v '<!--' | grep -v '-->')
+
+          VERSION=$(echo "$META"      | grep '^version:'         | sed 's/version: //'         | xargs)
+          RELEASE_TYPE=$(echo "$META" | grep '^release_type:'    | sed 's/release_type: //'    | xargs)
+          BRANCH=$(echo "$META"       | grep '^branch:'          | sed 's/branch: //'          | xargs)
+          IMAGE=$(echo "$META"        | grep '^image:'           | sed 's/image: //'           | xargs)
+          ENVIRONMENT=$(echo "$META"  | grep '^environment:'     | sed 's/environment: //'     | xargs)
+          REMAINING=$(echo "$META"    | grep '^remaining_chain:' | sed 's/remaining_chain: //' | xargs)
+
+          if [[ -z "$VERSION" ]]; then
+            echo "❌ Failed to parse metadata from issue body"
+            exit 1
+          fi
+
+          echo "version=${VERSION}"           >> $GITHUB_OUTPUT
+          echo "release_type=${RELEASE_TYPE}" >> $GITHUB_OUTPUT
+          echo "branch=${BRANCH}"             >> $GITHUB_OUTPUT
+          echo "image=${IMAGE}"               >> $GITHUB_OUTPUT
+          echo "environment=${ENVIRONMENT}"   >> $GITHUB_OUTPUT
+          echo "remaining=${REMAINING}"       >> $GITHUB_OUTPUT
+
+          echo "✅ version=${VERSION} | env=${ENVIRONMENT} | remaining=[${REMAINING}]"
+
+      # ── STEP 6a: Handle /approve ─────────────────────────────
+      - name: Handle /approve
+        if: |
+          steps.auth.outputs.authorized == 'true' &&
+          steps.parse.outputs.command == 'approve'
+        env:
+          GH_TOKEN:     ${{ secrets.PAT_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ACTOR:        ${{ github.event.comment.user.login }}
+          ENVIRONMENT:  ${{ steps.meta.outputs.environment }}
+          VERSION:      ${{ steps.meta.outputs.version }}
+          IMAGE:        ${{ steps.meta.outputs.image }}
+          RELEASE_TYPE: ${{ steps.meta.outputs.release_type }}
+          BRANCH:       ${{ steps.meta.outputs.branch }}
+          REMAINING:    ${{ steps.meta.outputs.remaining }}
+          REPO:         ${{ github.repository }}
+        run: |
+          gh issue comment "$ISSUE_NUMBER" --body \
+            "✅ **@${ACTOR}** approved deployment \`${VERSION}\` → **${ENVIRONMENT^^}**
+
+          🚀 Triggering deploy..."
+
+          gh issue edit  "$ISSUE_NUMBER" --add-label "approved"
+          gh issue close "$ISSUE_NUMBER" --reason completed
+
+          gh api "repos/${REPO}/dispatches" \
+            --method POST \
+            --field event_type="deploy-${ENVIRONMENT}" \
+            --field client_payload="{
+              \"version\": \"${VERSION}\",
+              \"image\": \"${IMAGE}\",
+              \"release_type\": \"${RELEASE_TYPE}\",
+              \"branch\": \"${BRANCH}\",
+              \"approved_by\": \"${ACTOR}\",
+              \"issue_number\": ${ISSUE_NUMBER},
+              \"remaining_chain\": \"${REMAINING}\"
+            }"
+
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  ✅ Approved by @${ACTOR}"
+          echo "  🚀 Dispatched: deploy-${ENVIRONMENT} → ${VERSION}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+      # ── STEP 6b: Handle /reject ──────────────────────────────
+      - name: Handle /reject
+        if: |
+          steps.auth.outputs.authorized == 'true' &&
+          steps.parse.outputs.command == 'reject'
+        env:
+          GH_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ACTOR:        ${{ github.event.comment.user.login }}
+          ENVIRONMENT:  ${{ steps.meta.outputs.environment }}
+          VERSION:      ${{ steps.meta.outputs.version }}
+          REASON:       ${{ steps.parse.outputs.reason }}
+        run: |
+          gh issue comment "$ISSUE_NUMBER" --body \
+            "🚫 **@${ACTOR}** rejected deployment \`${VERSION}\` → **${ENVIRONMENT^^}**
+
+          **Reason:** ${REASON}
+
+          ---
+          Deployment cancelled. Create a new release to retry."
+
+          gh issue edit  "$ISSUE_NUMBER" --add-label "rejected"
+          gh issue close "$ISSUE_NUMBER" --reason "not planned"
+
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  🚫 Rejected by @${ACTOR}: ${REASON}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
