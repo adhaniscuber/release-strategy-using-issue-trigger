@@ -143,7 +143,7 @@ jobs:
         env:
           ISSUE_BODY: ${{ github.event.issue.body }}
         run: |
-          META=$(echo "$ISSUE_BODY" | awk '/<!-- deploy-meta/,/-->/' | grep -v '<!--' | grep -v '-->')
+          META=$(echo "$ISSUE_BODY" | awk '/<!-- deploy-meta/,/-->/' | grep -v '<!--' | grep -v -- '-->')
 
           VERSION=$(echo "$META"      | grep '^version:'         | sed 's/version: //'         | xargs)
           RELEASE_TYPE=$(echo "$META" | grep '^release_type:'    | sed 's/release_type: //'    | xargs)
