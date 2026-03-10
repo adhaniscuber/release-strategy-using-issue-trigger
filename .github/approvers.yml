@@ -25,12 +25,16 @@ development: []
 
 # 1 approval required — any engineer can approve.
 staging:
-  - your-github-username
-  - another-engineer
+  - adhaniscuber
+  - prasetiodc17
+  - mwfirdaus
+  - DioSyahrizal
+  - mwrezha
 
 # 1 approval required — tech lead / CTO only.
 production:
-  - tech-lead-username
+  - adhaniscuber
+  - mwrezha
 
 # ── Optional environments ────────────────────────────────────
 # uat:

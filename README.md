@@ -39,6 +39,25 @@ Approval dilakukan via komentar di GitHub Issue yang otomatis dibuat workflow:
 
 Siapa yang boleh approve dikonfigurasi di `.github/approvers.yml`.
 
+## Flow Development (Preview)
+
+```
+1. Developer merge PR ke main
+
+2. Actions → Create Release
+   release_type   : regular
+   release_branch : (kosong / main)
+   bump_type      : patch / minor / major
+   → tag v1.5.4-preview dibuat
+   → dev: auto-deploy
+   → issue pending-staging dibuka → engineer /approve → deploy staging
+   Production: SKIP
+```
+
+> Dipakai untuk testing fitur baru di staging sebelum masuk ke official release.
+> Development auto-deploy, staging tetap butuh approval engineer.
+> Production selalu di-skip dari flow ini.
+
 ## Flow Normal (Sprint)
 
 ```
